@@ -36,7 +36,7 @@ pub enum ExceptionKind {
 pub struct Frame {
     pub caller: ast::Location,
     pub fn_name: Option<ast::Ident>,
-    pub fn_location: ast::Location,
+    pub fn_loc: ast::Location,
 }
 
 #[derive(Debug, Clone)]
@@ -130,8 +130,20 @@ impl std::fmt::Display for Frame {
             write!(
                 f,
                 "File {}, at {} in function <#closure:{}:{}>",
-                self.caller.file, self.caller.start, self.fn_location.file, self.fn_location.start
+                self.caller.file, self.caller.start, self.fn_loc.file, self.fn_loc.start
             )
         }
+    }
+}
+
+impl std::fmt::Display for ast::Ident {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ident")
+    }
+}
+
+impl std::fmt::Display for ast::ExprId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "expr")
     }
 }

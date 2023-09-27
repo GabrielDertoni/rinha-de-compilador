@@ -1,125 +1,107 @@
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct File {
     pub name: String,
-    #[serde(rename = "expression")]
-    pub expr: Box<Expr>,
-    pub location: Location,
+    pub expr: ExprId,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(Debug, Clone)]
 pub enum Expr {
-    #[serde(rename = "Function")]
     Fn(FnExpr),
     If(IfExpr),
     Let(LetExpr),
-    #[serde(rename = "Binary")]
     Bin(BinExpr),
+    Lit(LitExpr),
     Var(VarExpr),
     Call(CallExpr),
-    Str(StrLit),
-    Int(IntLit),
-    Tuple(TupleLit),
-    First(FirstExpr),
-    Second(SecondExpr),
-    Print(PrintExpr),
+    Builtin(BuiltinExpr),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BinExpr {
     pub op: BinOp,
-    pub lhs: Box<Expr>,
-    pub rhs: Box<Expr>,
-    pub location: Location,
+    pub lhs: ExprId,
+    pub rhs: ExprId,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VarExpr {
-    #[serde(rename = "text")]
     pub ident: Ident,
-    pub location: Location,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FnExpr {
-    #[serde(rename = "parameters")]
     pub params: Vec<Param>,
-    #[serde(alias = "value")]
-    pub body: Box<Expr>,
-    pub location: Location,
+    pub body: ExprId,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IfExpr {
-    pub condition: Box<Expr>,
-    pub then: Box<Expr>,
-    pub otherwise: Box<Expr>,
-    pub location: Location,
+    pub condition: ExprId,
+    pub then: ExprId,
+    pub otherwise: ExprId,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LetExpr {
     pub name: Param,
-    #[serde(rename = "value")]
-    pub init: Box<Expr>,
-    pub next: Box<Expr>,
-    pub location: Location,
+    pub init: ExprId,
+    pub next: ExprId,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CallExpr {
-    pub callee: Box<Expr>,
-    #[serde(rename = "arguments")]
-    pub args: Vec<Box<Expr>>,
-    pub location: Location,
+    pub callee: ExprId,
+    pub args: Vec<ExprId>,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+pub enum LitExpr {
+    Str(StrLit),
+    Int(IntLit),
+    Bool(BoolLit),
+    Tuple(TupleLit),
+}
+
+#[derive(Debug, Clone)]
 pub struct StrLit {
     pub value: String,
-    pub location: Location,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IntLit {
     pub value: i64,
-    pub location: Location,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+pub struct BoolLit {
+    pub value: bool,
+    pub loc: Location,
+}
+
+#[derive(Debug, Clone)]
 pub struct TupleLit {
-    pub first: Box<Expr>,
-    pub second: Box<Expr>,
+    pub first: ExprId,
+    pub second: ExprId,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrintExpr {
-    pub value: Box<Expr>,
-    pub location: Location,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FirstExpr {
-    pub value: Box<Expr>,
-    pub location: Location,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecondExpr {
-    pub value: Box<Expr>,
-    pub location: Location,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BuiltinExpr {
     pub name: Ident,
-    pub value: Box<Expr>,
-    pub location: Location,
+    pub args: Vec<ExprId>,
+    pub loc: Location,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub enum BinOp {
     Add,
     Sub,
@@ -136,22 +118,24 @@ pub enum BinOp {
     Or,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Location {
     pub start: usize,
     pub end: usize,
-    #[serde(rename = "filename")]
     pub file: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Param {
-    #[serde(rename = "text")]
     pub ident: Ident,
-    pub location: Location,
+    pub loc: Location,
 }
 
-pub type Ident = String;
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Ident(pub u32);
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExprId(pub u32);
 
 /* -- Impls -- */
 
