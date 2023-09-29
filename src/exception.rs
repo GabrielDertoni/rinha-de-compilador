@@ -1,4 +1,3 @@
-use crate::ast;
 use crate::{Context, Type};
 
 #[derive(Debug, Clone)]
@@ -121,29 +120,23 @@ impl std::fmt::Display for ExceptionKind {
 impl std::fmt::Display for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(fn_name) = &self.fn_name {
+            write!(f, "in fuction {fn_name}")
+            /*
             write!(
                 f,
                 "File '{}', at {} in function {}",
                 self.caller.file, self.caller.start, fn_name
             )
+            */
         } else {
+            write!(f, "in fuction <#closure>")
+            /*
             write!(
                 f,
                 "File {}, at {} in function <#closure:{}:{}>",
                 self.caller.file, self.caller.start, self.fn_loc.file, self.fn_loc.start
             )
+            */
         }
-    }
-}
-
-impl std::fmt::Display for ast::Ident {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ident")
-    }
-}
-
-impl std::fmt::Display for ast::ExprId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "expr")
     }
 }

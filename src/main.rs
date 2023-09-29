@@ -1,7 +1,7 @@
-mod ast;
 mod exception;
-mod from_json;
 mod value;
+mod sem;
+mod lower;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,8 +9,9 @@ use std::rc::Rc;
 
 use clap::Parser;
 
+use ast::from_json::{self, StrInterner};
+
 use exception::*;
-use from_json::Interner;
 use value::*;
 
 #[derive(Debug, Parser)]
@@ -242,6 +243,24 @@ impl<'caller> Context<'caller> {
     }
 }
 
+fn to_c<Node: ast::AstNode>(parse_cx: Rc<ast::from_json::BasicContext>, tree: Node) -> String {
+    let doc_alloc = pretty::Arena::new();
+    let cx = lower::Context {
+        inner: parse_cx.clone(),
+        doc: &doc_alloc,
+    };
+    let sem = sem::SemanticContext::new(parse_cx);
+    let mut vis = lower::LowerToC::new(&sem);
+
+    tree.accept(&mut vis, &cx);
+    let result = vis.finish(&doc_alloc);
+
+    let mut out = String::new();
+    result.render_fmt(80, &mut out).unwrap();
+
+    out
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -251,10 +270,16 @@ fn main() -> anyhow::Result<()> {
     let mut cx = from_json::BasicContext::new();
     let ast: ast::File = from_json::parse(&json, &mut cx)?;
 
+    let c = to_c(Rc::new(cx), ast.expr);
+    println!("{c}");
+
+    /*
     let mut builtins = HashMap::new();
-    // builtins.insert(cx.intern_static("first"), builtin_first as Builtin);
-    // builtins.insert(cx.intern_static("second"), builtin_second as Builtin);
-    builtins.insert(cx.intern_static("Print"), builtin_print as Builtin);
+    builtins.insert(ast::Ident(cx.intern_static("First")), builtin_first as Builtin);
+    builtins.insert(ast::Ident(cx.intern_static("Second")), builtin_second as Builtin);
+    builtins.insert(ast::Ident(cx.intern_static("Print")), builtin_print as Builtin);
+
+    cx.intern_static("tuple");
 
     let frame = Frame {
         caller: ast.loc.clone(),
@@ -271,6 +296,7 @@ fn main() -> anyhow::Result<()> {
         Ok(value) => println!(">> {value}"),
         Err(error) => eprintln!("{error}"),
     }
+    */
 
     Ok(())
 }
@@ -299,14 +325,13 @@ fn builtin_print(args: &[Value], cx: &Context) -> EvalResult {
     Ok(args[0].clone())
 }
 
-/*
 fn builtin_first(args: &[Value], cx: &Context) -> EvalResult {
     assert_args(&["tuple"], args.len()).map_err(|e| e.within(cx))?;
     let Value::Tuple(fst, _snd) = &args[0] else {
         return Err(ExceptionKind::WrongArgumentType {
             param: ast::Param {
-                ident: String::from("tuple"),
-                loc: ast::loc::builtin(),
+                ident: cx.cx.ident("tuple").unwrap(),
+                loc: ast::Location::builtin(),
             },
             expected: Type::Tuple,
             got: args[0].type_of(),
@@ -321,8 +346,8 @@ fn builtin_second(args: &[Value], cx: &Context) -> EvalResult {
     let Value::Tuple(_fst, snd) = &args[0] else {
         return Err(ExceptionKind::WrongArgumentType {
             param: ast::Param {
-                ident: String::from("tuple"),
-                loc: ast::loc::builtin(),
+                ident: cx.cx.ident("tuple").unwrap(),
+                loc: ast::Location::builtin(),
             },
             expected: Type::Tuple,
             got: args[0].type_of(),
@@ -331,4 +356,3 @@ fn builtin_second(args: &[Value], cx: &Context) -> EvalResult {
     };
     Ok((**snd).clone())
 }
-*/

@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::ops::{Add, Div, Mul, Not, Rem, Sub};
 use std::rc::Rc;
 
-use crate::ast;
 use crate::exception::ExceptionKind;
 use crate::Env;
 

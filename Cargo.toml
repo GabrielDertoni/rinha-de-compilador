@@ -11,3 +11,13 @@ clap = { version = "4.4.5", features = ["derive"] }
 indexmap = "2.0.0"
 serde = { version = "1.0.188", features = ["derive"] }
 serde_json = "1.0.107"
+
+ast.path = "ast"
+ast-derive.path = "ast_derive"
+pretty = "0.12.3"
+
+[workspace]
+members = [
+    "ast",
+    "ast_derive",
+]

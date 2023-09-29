@@ -1,6 +1,6 @@
 use serde_json::value as json;
 
-use crate::ast;
+use crate::{ast, VisitContext};
 
 pub fn parse<T, Context>(value: &json::Value, cx: &mut Context) -> Result<T, Error>
 where
@@ -92,6 +92,12 @@ impl<'a> Value<'a> {
     }
 }
 
+impl<'a> From<&'a json::Value> for Value<'a> {
+    fn from(value: &'a json::Value) -> Self {
+        Value(value)
+    }
+}
+
 pub struct Object<'a>(pub &'a json::Map<String, json::Value>);
 
 impl<'a> Object<'a> {
@@ -117,25 +123,50 @@ pub trait ExprAlloc {
     fn alloc(&mut self, expr: ast::Expr) -> ast::ExprId;
 }
 
-pub trait Interner {
-    fn intern_str(&mut self, s: &str) -> ast::Ident;
+pub trait StrInterner {
+    fn intern_str(&mut self, s: &str) -> ast::InternedStr;
 
-    fn intern_static(&mut self, s: &'static str) -> ast::Ident {
+    fn intern_static(&mut self, s: &'static str) -> ast::InternedStr {
         self.intern_str(s)
     }
 }
 
+pub trait LocationAlloc {
+    fn alloc_loc(&mut self, loc: ast::LocationData) -> ast::Location;
+}
+
 /* -- Basic context -- */
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BasicContext {
     pub exprs: Vec<ast::Expr>,
     pub strs: indexmap::IndexSet<String>,
+    pub locs: indexmap::IndexSet<ast::LocationData>,
 }
 
 impl BasicContext {
     pub fn new() -> Self {
-        Default::default()
+        let mut cx = BasicContext {
+            exprs: Vec::new(),
+            strs: indexmap::IndexSet::new(),
+            locs: indexmap::IndexSet::new(),
+        };
+
+        let (id, _) = cx.strs.insert_full(String::from("builtin"));
+        let builtin_file = ast::InternedStr(id as u32);
+
+        cx.locs.insert(ast::LocationData {
+            start: 0,
+            end: 0,
+            file: builtin_file,
+        });
+
+        cx
+    }
+
+    pub fn ident(&self, s: &str) -> Option<ast::Ident> {
+        let ix = self.strs.get_index_of(s)?;
+        Some(ast::Ident(ast::InternedStr(ix as u32)))
     }
 }
 
@@ -151,6 +182,14 @@ impl std::ops::Index<ast::Ident> for BasicContext {
     type Output = str;
 
     fn index(&self, index: ast::Ident) -> &Self::Output {
+        &self[index.0]
+    }
+}
+
+impl std::ops::Index<ast::InternedStr> for BasicContext {
+    type Output = str;
+
+    fn index(&self, index: ast::InternedStr) -> &Self::Output {
         self.strs[index.0 as usize].as_str()
     }
 }
@@ -163,24 +202,34 @@ impl ExprAlloc for BasicContext {
     }
 }
 
-impl Interner for BasicContext {
-    fn intern_str(&mut self, s: &str) -> ast::Ident {
+impl StrInterner for BasicContext {
+    fn intern_str(&mut self, s: &str) -> ast::InternedStr {
         if let Some(id) = self.strs.get_index_of(s) {
-            ast::Ident(id as u32)
+            ast::InternedStr(id as u32)
         } else {
             let (id, success) = self.strs.insert_full(s.to_owned());
             debug_assert!(success);
-            ast::Ident(id as u32)
+            ast::InternedStr(id as u32)
         }
     }
 }
+
+impl LocationAlloc for BasicContext {
+    fn alloc_loc(&mut self, loc: ast::LocationData) -> ast::Location {
+        let (id, _success) = self.locs.insert_full(loc);
+        ast::Location(id as u32)
+    }
+}
+
+impl VisitContext for BasicContext {}
 
 /* -- AST impls -- */
 
 impl<Context> FromJson<Context> for ast::File
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -196,7 +245,8 @@ where
 impl<Context> FromJson<Context> for ast::Expr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -219,7 +269,8 @@ where
 impl<Context> FromJson<Context> for ast::BinExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -234,7 +285,7 @@ where
 }
 
 impl<Context> FromJson<Context> for ast::BinOp {
-    fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
+    fn from_json<'a>(value: Value<'a>, _cx: &mut Context) -> Result<Self, Error> {
         let op = value.string()?;
 
         match op {
@@ -259,7 +310,8 @@ impl<Context> FromJson<Context> for ast::BinOp {
 impl<Context> FromJson<Context> for ast::VarExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -274,7 +326,8 @@ where
 impl<Context> FromJson<Context> for ast::FnExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -290,7 +343,8 @@ where
 impl<Context> FromJson<Context> for ast::IfExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -307,7 +361,8 @@ where
 impl<Context> FromJson<Context> for ast::CallExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -323,7 +378,8 @@ where
 impl<Context> FromJson<Context> for ast::LetExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -340,7 +396,8 @@ where
 impl<Context> FromJson<Context> for ast::BuiltinExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -356,7 +413,8 @@ where
 impl<Context> FromJson<Context> for ast::LitExpr
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -374,7 +432,11 @@ where
     }
 }
 
-impl<Context> FromJson<Context> for ast::StrLit {
+impl<Context> FromJson<Context> for ast::StrLit
+where
+    Context: StrInterner,
+    Context: LocationAlloc,
+{
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
 
@@ -385,7 +447,11 @@ impl<Context> FromJson<Context> for ast::StrLit {
     }
 }
 
-impl<Context> FromJson<Context> for ast::IntLit {
+impl<Context> FromJson<Context> for ast::IntLit
+where
+    Context: StrInterner,
+    Context: LocationAlloc,
+{
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
 
@@ -396,7 +462,11 @@ impl<Context> FromJson<Context> for ast::IntLit {
     }
 }
 
-impl<Context> FromJson<Context> for ast::BoolLit {
+impl<Context> FromJson<Context> for ast::BoolLit
+where
+    Context: StrInterner,
+    Context: LocationAlloc,
+{
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
 
@@ -410,7 +480,8 @@ impl<Context> FromJson<Context> for ast::BoolLit {
 impl<Context> FromJson<Context> for ast::TupleLit
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -425,7 +496,8 @@ where
 
 impl<Context> FromJson<Context> for ast::Param
 where
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
@@ -437,14 +509,29 @@ where
     }
 }
 
-impl<Context> FromJson<Context> for ast::Location {
-    fn from_json<'a>(value: Value<'a>, _cx: &mut Context) -> Result<Self, Error> {
+impl<Context> FromJson<Context> for ast::Location
+where
+    Context: StrInterner,
+    Context: LocationAlloc,
+{
+    fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
+        let loc = value.parse(cx)?;
+        Ok(cx.alloc_loc(loc))
+    }
+}
+
+impl<Context> FromJson<Context> for ast::LocationData
+where
+    Context: StrInterner,
+    Context: LocationAlloc,
+{
+    fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let obj = value.object()?;
 
         Ok(Self {
             start: obj.field("start")?.usize()?,
             end: obj.field("end")?.usize()?,
-            file: obj.field("filename")?.string()?.to_owned(),
+            file: obj.field("filename")?.parse(cx)?,
         })
     }
 }
@@ -452,7 +539,8 @@ impl<Context> FromJson<Context> for ast::Location {
 impl<Context> FromJson<Context> for ast::ExprId
 where
     Context: ExprAlloc,
-    Context: Interner,
+    Context: StrInterner,
+    Context: LocationAlloc,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         let expr = value.parse(cx)?;
@@ -462,7 +550,16 @@ where
 
 impl<Context> FromJson<Context> for ast::Ident
 where
-    Context: Interner,
+    Context: StrInterner,
+{
+    fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
+        Ok(ast::Ident(value.parse(cx)?))
+    }
+}
+
+impl<Context> FromJson<Context> for ast::InternedStr
+where
+    Context: StrInterner,
 {
     fn from_json<'a>(value: Value<'a>, cx: &mut Context) -> Result<Self, Error> {
         Ok(cx.intern_str(value.string()?))

@@ -1,3 +1,5 @@
+use crate::AstNode;
+
 #[derive(Debug, Clone)]
 pub struct File {
     pub name: String,
@@ -5,7 +7,8 @@ pub struct File {
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_expr)]
 pub enum Expr {
     Fn(FnExpr),
     If(IfExpr),
@@ -17,7 +20,9 @@ pub enum Expr {
     Builtin(BuiltinExpr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_bin_expr)]
+#[visit_skip(op, loc)]
 pub struct BinExpr {
     pub op: BinOp,
     pub lhs: ExprId,
@@ -25,20 +30,26 @@ pub struct BinExpr {
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_var_expr)]
+#[visit_skip_all]
 pub struct VarExpr {
     pub ident: Ident,
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_fn_expr)]
+#[visit_skip(params, loc)]
 pub struct FnExpr {
     pub params: Vec<Param>,
     pub body: ExprId,
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_if_expr)]
+#[visit_skip(loc)]
 pub struct IfExpr {
     pub condition: ExprId,
     pub then: ExprId,
@@ -46,7 +57,9 @@ pub struct IfExpr {
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_let_expr)]
+#[visit_skip(name, loc)]
 pub struct LetExpr {
     pub name: Param,
     pub init: ExprId,
@@ -54,14 +67,27 @@ pub struct LetExpr {
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_call_expr)]
+#[visit_skip(loc)]
 pub struct CallExpr {
     pub callee: ExprId,
     pub args: Vec<ExprId>,
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_builtin_expr)]
+#[visit_skip(name, loc)]
+pub struct BuiltinExpr {
+    pub name: Ident,
+    pub args: Vec<ExprId>,
+    pub loc: Location,
+}
+
+#[derive(Debug, Clone, AstNode)]
+#[visit(visit_lit_expr)]
+#[visit_skip_all]
 pub enum LitExpr {
     Str(StrLit),
     Int(IntLit),
@@ -94,13 +120,6 @@ pub struct TupleLit {
     pub loc: Location,
 }
 
-#[derive(Debug, Clone)]
-pub struct BuiltinExpr {
-    pub name: Ident,
-    pub args: Vec<ExprId>,
-    pub loc: Location,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum BinOp {
     Add,
@@ -119,10 +138,13 @@ pub enum BinOp {
 }
 
 #[derive(Debug, Clone)]
-pub struct Location {
+pub struct Location(pub u32);
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LocationData {
     pub start: usize,
     pub end: usize,
-    pub file: String,
+    pub file: InternedStr,
 }
 
 #[derive(Debug, Clone)]
@@ -132,39 +154,10 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Ident(pub u32);
+pub struct Ident(pub InternedStr);
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExprId(pub u32);
 
-/* -- Impls -- */
-
-impl Location {
-    pub fn builtin() -> Location {
-        Location {
-            start: 0,
-            end: 0,
-            file: String::from("builtin"),
-        }
-    }
-}
-
-impl std::fmt::Display for BinOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BinOp::Add => write!(f, "+"),
-            BinOp::Sub => write!(f, "-"),
-            BinOp::Mul => write!(f, "*"),
-            BinOp::Div => write!(f, "/"),
-            BinOp::Rem => write!(f, "%"),
-            BinOp::Eq => write!(f, "=="),
-            BinOp::Neq => write!(f, "!="),
-            BinOp::Lt => write!(f, "<"),
-            BinOp::Gt => write!(f, ">"),
-            BinOp::Lte => write!(f, "<="),
-            BinOp::Gte => write!(f, ">="),
-            BinOp::And => write!(f, "and"),
-            BinOp::Or => write!(f, "or"),
-        }
-    }
-}
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InternedStr(pub u32);
