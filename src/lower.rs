@@ -1,34 +1,12 @@
-use std::{borrow::Cow, collections::HashMap, rc::Rc};
+use pretty::{docs, Doc, DocAllocator};
 
-use pretty::{docs, Doc, DocAllocator, RefDoc};
+use ast::{AstNode, VisitContext, Visitor};
 
-use ast::{from_json::BasicContext, AstNode, VisitContext, Visitor};
-
-use crate::sem::{DefKind, RefKind, SemanticContext};
+use crate::sem::SemanticContext;
 
 type DocBuilder<'a> = pretty::DocBuilder<'a, pretty::Arena<'a>>;
 type BuildDoc<'a> = pretty::BuildDoc<'a, pretty::RefDoc<'a>, ()>;
 
-/*
-#[derive(Debug, Clone)]
-pub enum CStmt {
-    If(CIfStmt),
-    Return(CReturnStmt),
-    Expr(CExprStmt),
-    Block(CBlockStmt),
-}
-
-#[derive(Debug, Clone)]
-pub struct CIfStmt {
-    pub condition: Box<CExpr>,
-    pub then: Box<CStmt>,
-    pub otherwise: Box<CStmt>,
-}
-
-#[derive(Debug, Clone)]
-*/
-
-const RESULT_VAR_NAME: &'static str = "result";
 const CAPTURE_VAR_NAME: &'static str = "capture";
 const CLOSURE_FN_PTR_NAME: &'static str = "base";
 const OBJECT_TYPE: &'static str = "object_t";
@@ -41,8 +19,12 @@ pub struct LowerToC<'a> {
 
     // Code that is goingo the top of the C output
     toplevel: BuildDoc<'a>,
-    // Variables to be hoisted up to the current function scope
-    hoisted_vars: Vec<Cow<'static, str>>,
+    // How many C variables we need to allocate hoisted
+    hoisted_vars: usize,
+    // How many C variables are live
+    live_vars: usize,
+    // Where to write the result of the current expression
+    result_var: Option<DocBuilder<'a>>,
     curr: Option<ast::ExprId>,
 }
 
@@ -52,20 +34,29 @@ impl<'a> LowerToC<'a> {
             code: None,
             sem,
             toplevel: BuildDoc::nil(),
-            hoisted_vars: Vec::new(),
+            hoisted_vars: 1,
+            live_vars: 1,
+            result_var: None,
             curr: None,
         }
     }
 
-    // Returns a "reference" to a hoisted variable
-    pub fn new_var(&mut self, basename: impl Into<Cow<'static, str>>) -> usize {
-        let id = self.hoisted_vars.len();
-        self.hoisted_vars.push(basename.into());
-        id
+    // Returns the name of a hoisted variable, allocating a new one if necessary
+    pub fn alloc_var(&mut self, alloc: &'a pretty::Arena<'a>) -> DocBuilder<'a> {
+        let id = self.live_vars;
+        self.live_vars += 1;
+        self.hoisted_vars = self.hoisted_vars.max(self.live_vars);
+        alloc.as_string(format_args!("_{id}"))
     }
 
-    pub fn get_var(&mut self, alloc: &'a pretty::Arena<'a>, var: usize) -> DocBuilder<'a> {
-        alloc.as_string(format_args!("{}_{var}", self.hoisted_vars[var]))
+    pub fn next_var(&self, alloc: &'a pretty::Arena<'a>) -> DocBuilder<'a> {
+        let id = self.live_vars;
+        alloc.as_string(format_args!("_{id}"))
+    }
+
+    pub fn push_var(&mut self) {
+        self.live_vars += 1;
+        self.hoisted_vars = self.hoisted_vars.max(self.live_vars);
     }
 
     pub fn set(&mut self, code: DocBuilder<'a>) {
@@ -73,18 +64,88 @@ impl<'a> LowerToC<'a> {
         self.code = Some(code);
     }
 
-    pub fn scope<R>(
+    pub fn result_var(&self, alloc: &'a pretty::Arena<'a>) -> DocBuilder<'a> {
+        self.result_var
+            .clone()
+            .expect("should have some variable to put the output")
+    }
+
+    /// Evaluate an expression and write the result to `var`. `action` should `set` to an
+    /// expression which will be finished when it returns.
+    pub fn eval_to(
+        &mut self,
+        var: DocBuilder<'a>,
+        action: impl FnOnce(&mut Self),
+    ) -> DocBuilder<'a> {
+        let save_result_var = self.result_var.replace(var);
+        action(self);
+        let code = self.finish_expr().code;
+        self.result_var = save_result_var;
+        code
+    }
+
+    /// Evaluate an expression and save the result to a fresh variable. `action` should build
+    /// an expression inside of `self` that will be finished once it returns.
+    pub fn eval(
+        &mut self,
+        alloc: &'a pretty::Arena<'a>,
+        action: impl FnOnce(&mut Self),
+    ) -> CExprResult<'a> {
+        // The result of the expression will be stored in this variable
+        let var = self.next_var(alloc);
+        let save_result_var = self.result_var.replace(var);
+        action(self);
+        let result = self.finish_expr();
+        self.result_var = save_result_var;
+
+        // Mark the value as used. We only need to do this here, since `action` may
+        // use `var` as it wishes, so long as it writes the final value to it in
+        // the end of the expression. However, now we have the value we wanted in
+        // the variable and should no longer change it within the scope.
+        self.push_var();
+
+        result
+    }
+
+    pub fn eval_c(
+        mut self,
+        alloc: &'a pretty::Arena<'a>,
+        action: impl FnOnce(&mut Self),
+    ) -> DocBuilder<'a> {
+        let result = self.next_var(alloc);
+        self.result_var = Some(result);
+        action(&mut self);
+        self.result_var = None;
+        self.finish(alloc)
+    }
+
+    // A scope allows for use of variables local to it, it also calls `finish_expr` at the end.
+    // The result of evaluating the expression will be stored on a new variable. `action`
+    // should generate code for one expression.
+    pub fn scope<R>(&mut self, action: impl FnOnce(&mut Self) -> R) -> R {
+        let save_live_vars = self.live_vars;
+        let result = action(self);
+        self.live_vars = save_live_vars;
+        result
+    }
+
+    pub fn fn_scope<R>(
         &mut self,
         alloc: &'a pretty::Arena<'a>,
         action: impl FnOnce(&mut Self) -> R,
     ) -> (R, DocBuilder<'a>) {
         debug_assert!(self.code.is_none(), "probably a bug");
 
-        let save_hoisted = std::mem::take(&mut self.hoisted_vars);
+        let save_hoisted = self.hoisted_vars;
+        let save_live = self.live_vars;
+
+        self.hoisted_vars = 0;
+        self.live_vars = 0;
         let result = action(self);
-        let code = self.finish_scope(alloc);
+        let code = self.finish_fn(alloc);
 
         self.hoisted_vars = save_hoisted;
+        self.live_vars = save_live;
         (result, code)
     }
 
@@ -96,43 +157,25 @@ impl<'a> LowerToC<'a> {
         self.toplevel = toplevel.append(doc).into();
     }
 
-    // Returns the code for the expression that was built, the result of the evaluated
-    // expression is going to be in the variable `result`
-    pub fn finish_expr(&mut self) -> DocBuilder<'a> {
-        self.code.take().expect("finishing without value")
+    fn assign_result_to(&self, value: DocBuilder<'a>) -> DocBuilder<'a> {
+        let alloc = value.0;
+        assign_stmt(self.result_var(alloc), value)
     }
 
-    // Finish the current expression and assign the `result` variable to another name. A fresh
-    // variable will be created for storing the result and it will be hoisted.
-    pub fn finish_expr_with_var(
-        &mut self,
-        basename: impl Into<Cow<'static, str>>,
-    ) -> CExprResult<'a> {
-        let code = self.finish_expr();
-        let alloc = code.0;
-        let var = self.new_var(basename);
-        let var = self.get_var(alloc, var);
-
-        CExprResult {
-            code: code.append(assign_stmt(var.clone(), alloc.text(RESULT_VAR_NAME))),
-            var,
-        }
+    // Returns the code for the expression that was built, the result of the evaluated
+    // expression is going to be in the variable `result`
+    pub fn finish_expr(&mut self) -> CExprResult<'a> {
+        let code = self.code.take().expect("finishing without value");
+        let var = self.result_var(code.0);
+        CExprResult { code, var }
     }
 
     // Finish the current scope of the enclosing function
-    pub fn finish_scope(&mut self, alloc: &'a pretty::Arena<'a>) -> DocBuilder<'a> {
-        let hoisted = alloc.concat(
-            std::mem::take(&mut self.hoisted_vars)
-                .into_iter()
-                .enumerate()
-                .map(|(i, var)| {
-                    let var = alloc.as_string(format_args!("{var}_{i}"));
-                    stmt(docs![alloc, OBJECT_TYPE, Doc::space(), var])
-                }),
-        );
-        // Include the `result` variable as well, which must always be present
-        let hoisted =
-            stmt(docs![alloc, OBJECT_TYPE, Doc::space(), RESULT_VAR_NAME]).append(hoisted);
+    pub fn finish_fn(&mut self, alloc: &'a pretty::Arena<'a>) -> DocBuilder<'a> {
+        let hoisted = alloc.concat((0..self.hoisted_vars).map(|i| {
+            let var = alloc.as_string(format_args!("_{i}"));
+            stmt(docs![alloc, OBJECT_TYPE, Doc::space(), var])
+        }));
 
         if let Some(code) = self.code.take() {
             hoisted.append(code)
@@ -143,7 +186,7 @@ impl<'a> LowerToC<'a> {
 
     // Return the completed C document
     pub fn finish(mut self, alloc: &'a pretty::Arena<'a>) -> DocBuilder<'a> {
-        let scope = self.finish_scope(alloc);
+        let scope = self.finish_fn(alloc);
         docs![
             alloc,
             "#include \"rt.h\"",
@@ -220,7 +263,7 @@ where
 
     fn visit_var_expr(&mut self, expr: &ast::VarExpr, cx: &Context<'a, Cx>) {
         let code = self.load_var(expr.ident, cx);
-        self.set(assign_result_to(code))
+        self.set(self.assign_result_to(code))
     }
 
     fn visit_fn_expr(&mut self, expr: &ast::FnExpr, cx: &Context<'a, Cx>) {
@@ -232,30 +275,20 @@ where
 
         // Declare the capture struct
         let n = expr.loc.0; // TODO: make this better
-        let struct_name = cx.doc.as_string(format_args!("_closure_{n}"));
+        let struct_name = cx.doc.as_string(format_args!("_capture_{n}"));
         self.append_toplevel(mk_struct(
             struct_name.clone(),
-            // The first field must be a pointer to the function itself
-            std::iter::once(
-                cx.doc
-                    .text("closure_t ")
-                    .append(cx.doc.text(CLOSURE_FN_PTR_NAME)),
-            )
-            .chain(
-                free_vars
-                    .keys()
-                    .map(|&var| mk_field(cx.doc, &cx.inner[var])),
-            ),
+            free_vars
+                .keys()
+                .map(|&var| mk_field(cx.doc, &cx.inner[var])),
         ));
 
         let fn_name = cx.doc.as_string(format_args!("_closure_fn_{n}"));
         let arg_list = cx.doc.text("arg_list");
         let params = [
-            docs![cx.doc, struct_name.clone(), " ", CAPTURE_VAR_NAME],
+            docs![cx.doc, ptr(struct_name.clone()), " ", CAPTURE_VAR_NAME],
             docs![cx.doc, OBJECT_TYPE, " ", arg_list.clone()],
         ];
-
-        let result_var = cx.doc.text(RESULT_VAR_NAME);
 
         // Lets generate the function
         let fn_header = docs![
@@ -263,39 +296,41 @@ where
             OBJECT_TYPE,
             " ",
             fn_name.clone(),
-            cx.doc.intersperse(params, cx.doc.text(",")).parens()
+            cx.doc
+                .intersperse(params, cx.doc.reflow(", "))
+                .align()
+                .parens()
         ];
 
-        let (_, fn_body) = self.scope(cx.doc, |vis| {
+        let (_, fn_body) = self.fn_scope(cx.doc, |vis| {
             // Inside the function, first load arguments from the argument list
             let load_args = cx
                 .doc
                 .concat(expr.params.iter().enumerate().flat_map(|(i, param)| {
                     // objec_t _user_var0;
-                    // _user_var0 = get_arg_list(result, 0);
+                    // _user_var0 = get_arg(result, 0);
                     let var = user_var(cx.doc, &cx.inner[param.ident]);
                     [
                         decl_stmt(var.clone()),
                         assign_stmt(
                             var,
-                            builtin_call2(get_arg_list, arg_list.clone(), cx.doc.as_string(i)),
+                            builtin_call2(get_arg, arg_list.clone(), cx.doc.as_string(i)),
                         ),
                     ]
                 }));
 
             // Now finally generate the code for the function
-            expr.body.accept(vis, cx);
-            let code = vis.finish_expr();
+            let result = vis.eval(cx.doc, |vis| expr.body.accept(vis, cx));
             vis.set(docs![
                 cx.doc,
                 load_args,
-                code,
+                result.code,
                 // return result;
-                stmt(docs![cx.doc, "return", " ", result_var.clone()]),
+                stmt(docs![cx.doc, "return", " ", result.var]),
             ])
         });
 
-        let fn_def = fn_header.append(block(fn_body));
+        let fn_def = fn_header.append(cx.doc.space()).append(block(fn_body));
         self.append_toplevel(fn_def);
 
         let closure_var = cx.doc.as_string(format_args!("capture_{n}"));
@@ -304,7 +339,12 @@ where
         let create_capture = docs![
             cx.doc,
             // _closure_N capture_n;
-            stmt(docs![cx.doc, ptr(struct_name.clone()), Doc::space(), closure_var.clone()]),
+            stmt(docs![
+                cx.doc,
+                ptr(struct_name.clone()),
+                Doc::space(),
+                closure_var.clone()
+            ]),
             // closure = (_closure_N)malloc(sizeof(CLOSURE_STRUCT));
             assign_stmt(
                 closure_var.clone(),
@@ -329,26 +369,27 @@ where
                 )
             })),
             // result = closure;
-            assign_result_to(closure_var),
+            self.assign_result_to(closure_var),
         ];
 
         self.set(create_capture);
     }
 
     fn visit_if_expr(&mut self, expr: &ast::IfExpr, cx: &Context<'a, Cx>) {
-        expr.condition.accept(self, cx);
-        let condition = self.finish_expr_with_var("condition");
+        let condition =
+            self.scope(|vis| vis.eval(cx.doc, |vis| expr.condition.accept(vis, cx)));
 
         expr.then.accept(self, cx);
-        let then = self.finish_expr();
+        let then = self.finish_expr().code;
 
         expr.otherwise.accept(self, cx);
-        let otherwise = self.finish_expr();
+        let otherwise = self.finish_expr().code;
 
         self.set(docs![
             cx.doc,
             condition.code,
             cx.doc.reflow("if ").append(condition.var.parens()),
+            " ",
             block(then),
             cx.doc.reflow(" else "),
             block(otherwise),
@@ -357,22 +398,19 @@ where
     }
 
     fn visit_let_expr(&mut self, expr: &ast::LetExpr, cx: &Context<'a, Cx>) {
-        expr.init.accept(self, cx);
-        let init_code = self.finish_expr();
         let var_name = &cx.inner[expr.name.ident];
+        let var = user_var(cx.doc, var_name);
+
+        let init_code = self.eval_to(var.clone(), |vis| expr.init.accept(vis, cx));
 
         expr.next.accept(self, cx);
-        let in_code = self.finish_expr();
+        let in_code = self.finish_expr().code;
 
-        let var = user_var(cx.doc, var_name);
-        let result_var = cx.doc.text(RESULT_VAR_NAME);
         self.set(docs![
             cx.doc,
-            init_code,
             // object_t _var_VAR;
             stmt(docs![cx.doc, OBJECT_TYPE, Doc::space(), var.clone()]),
-            // _user_VAR = result;
-            assign_stmt(var, result_var),
+            init_code,
             in_code,
         ])
     }
@@ -394,123 +432,111 @@ where
             ast::BinOp::Or => "||",
         };
 
-        expr.lhs.accept(self, cx);
-        let lhs = self.finish_expr_with_var("lhs");
+        self.scope(|vis| {
+            let lhs = vis.eval(cx.doc, |vis| expr.lhs.accept(vis, cx));
+            let rhs = vis.eval(cx.doc, |vis| expr.rhs.accept(vis, cx));
 
-        expr.rhs.accept(self, cx);
-        let rhs = self.finish_expr_with_var("rhs");
-
-        self.set(lhs.merge(rhs, |lhs, rhs| {
-            assign_result_to(
-                cx.doc
-                    .intersperse([lhs, cx.doc.text(op), rhs], cx.doc.space()),
-            )
-        }));
+            vis.set(lhs.merge(rhs, |lhs, rhs| {
+                vis.assign_result_to(
+                    cx.doc
+                        .intersperse([lhs, cx.doc.text(op), rhs], cx.doc.space()),
+                )
+            }));
+        });
     }
 
     fn visit_lit_expr(&mut self, expr: &ast::LitExpr, cx: &Context<'a, Cx>) {
         let doc = match expr {
-            ast::LitExpr::Str(lit) => assign_result_to(builtin_call1(
+            ast::LitExpr::Str(lit) => self.assign_result_to(builtin_call1(
                 mk_static_str,
                 cx.doc.as_string(&lit.value).double_quotes(),
             )),
             ast::LitExpr::Int(int) => {
-                assign_result_to(builtin_call1(mk_int, cx.doc.as_string(int.value)))
+                self.assign_result_to(builtin_call1(mk_int, cx.doc.as_string(int.value)))
             }
             ast::LitExpr::Bool(bool) => {
-                assign_result_to(builtin_call1(mk_bool, cx.doc.as_string(bool.value)))
+                self.assign_result_to(builtin_call1(mk_bool, cx.doc.as_string(bool.value)))
             }
-            ast::LitExpr::Tuple(tup) => {
-                tup.first.accept(self, cx);
-                let fst = self.finish_expr_with_var("fst");
-
-                tup.second.accept(self, cx);
-                let snd = self.finish_expr_with_var("snd");
+            ast::LitExpr::Tuple(tup) => self.scope(|vis| {
+                let fst = vis.eval(cx.doc, |vis| tup.first.accept(vis, cx));
+                let snd = vis.eval(cx.doc, |vis| tup.second.accept(vis, cx));
 
                 fst.merge(snd, |fst, snd| {
-                    assign_result_to(builtin_call2(mk_tuple, fst, snd))
+                    vis.assign_result_to(builtin_call2(mk_tuple, fst, snd))
                 })
-            }
+            }),
         };
         self.set(doc);
     }
 
     fn visit_call_expr(&mut self, expr: &ast::CallExpr, cx: &Context<'a, Cx>) {
-        expr.callee.accept(self, cx);
-        let callee = self.finish_expr_with_var("callee");
+        self.scope(|vis| {
+            let callee = vis.eval(cx.doc, |vis| expr.callee.accept(vis, cx));
 
-        let mut code = callee.code;
-        let mut args = Vec::new();
+            let mut code = callee.code;
+            let mut args = Vec::new();
 
-        for arg in &expr.args {
-            arg.accept(self, cx);
-            let arg = self.finish_expr_with_var("arg");
-            code = code.append(arg.code);
-            args.push(arg.var);
-        }
+            for arg in &expr.args {
+                let arg = vis.eval(cx.doc, |vis| arg.accept(vis, cx));
+                code = code.append(arg.code);
+                args.push(arg.var);
+            }
 
-        let result_var = cx.doc.text(RESULT_VAR_NAME);
-
-        self.set(docs![
-            cx.doc,
-            code,
-            // result = mk_arg_list(N);
-            assign_result_to(builtin_call1(
-                mk_arg_list,
-                cx.doc.as_string(expr.args.len())
-            )),
-            // set_arg_list(result, 0, arg0);
-            // set_arg_list(result, 1, arg1);
-            // ...and so on
-            cx.doc
-                .concat(args.iter().enumerate().map(|(i, arg)| stmt(builtin_call3(
-                    set_arg_list,
-                    result_var.clone(),
-                    cx.doc.as_string(i),
-                    arg.clone()
-                )))),
-            // result = call(callee, result /* the arg list */);
-            assign_result_to(builtin_call2(call, callee.var, result_var)),
-        ]);
+            vis.set(docs![
+                cx.doc,
+                code,
+                // result = mk_args(N);
+                vis.assign_result_to(builtin_call1(mk_args, cx.doc.as_string(expr.args.len()))),
+                // set_arg(result, 0, arg0);
+                // set_arg(result, 1, arg1);
+                // ...and so on
+                cx.doc
+                    .concat(args.iter().enumerate().map(|(i, arg)| stmt(builtin_call3(
+                        set_arg,
+                        vis.result_var(cx.doc),
+                        cx.doc.as_string(i),
+                        arg.clone()
+                    )))),
+                // result = call(callee, result /* the arg list */);
+                vis.assign_result_to(builtin_call2(call, callee.var, vis.result_var(cx.doc))),
+            ]);
+        });
     }
 
     fn visit_builtin_expr(&mut self, expr: &ast::BuiltinExpr, cx: &Context<'a, Cx>) {
-        let mut code: DocBuilder<'a> = cx.doc.nil();
-        let mut vars = Vec::new();
+        self.scope(|vis| {
+            let mut code: DocBuilder<'a> = cx.doc.nil();
+            let mut vars = Vec::new();
 
-        for arg in &expr.args {
-            arg.accept(self, cx);
-            let result = self.finish_expr_with_var("arg");
+            for arg in &expr.args {
+                let result = vis.eval(cx.doc, |vis| arg.accept(vis, cx));
 
-            code = code.append(result.code);
-            vars.push(result.var);
-        }
+                code = code.append(result.code);
+                vars.push(result.var);
+            }
 
-        let fn_name = cx.doc.as_string(&cx.inner[expr.name]).double_quotes();
+            let fn_name = cx.doc.as_string(&cx.inner[expr.name]).double_quotes();
+            let args_var = vis.alloc_var(cx.doc);
 
-        let result_var = cx.doc.text(RESULT_VAR_NAME);
-
-        self.set(docs![
-            cx.doc,
-            code,
-            // result = mk_arg_list(N);
-            assign_result_to(builtin_call1(
-                mk_arg_list,
-                cx.doc.as_string(expr.args.len())
-            )),
-            // set_arg_list(result, 0, arg0);
-            // set_arg_list(result, 1, arg1);
-            // ...and so on
-            cx.doc
-                .concat(vars.iter().enumerate().map(|(i, arg)| stmt(builtin_call3(
-                    set_arg_list,
-                    result_var.clone(),
-                    cx.doc.as_string(i),
-                    arg.clone()
-                )))),
-            // result = extern_call("builtin_name", result);
-            assign_result_to(builtin_call2(extern_call, fn_name, result_var)),
-        ]);
+            vis.set(docs![
+                cx.doc,
+                code,
+                // result = mk_args(N);
+                assign_stmt(args_var, builtin_call1(mk_args, cx.doc.as_string(expr.args.len()))),
+                // set_arg(result, 0, arg0);
+                // set_arg(result, 1, arg1);
+                // ...and so on
+                cx.doc
+                    .concat(vars.iter().enumerate().map(|(i, arg)| stmt(builtin_call3(
+                        set_arg,
+                        vis.result_var(cx.doc),
+                        cx.doc.as_string(i),
+                        arg.clone()
+                    )))),
+                // result = extern_call("builtin_name", result);
+                vis.assign_result_to(builtin_call2(extern_call, fn_name, vis.result_var(cx.doc))),
+            ]);
+        })
     }
 }
 
@@ -547,9 +573,9 @@ declare_builtins! {
     call/2;
     extern_call/2;
 
-    mk_arg_list/1;
-    set_arg_list/3;
-    get_arg_list/2;
+    mk_args/1;
+    set_arg/3;
+    get_arg/2;
 }
 
 fn builtin_call1<'a, F>(_marker: F, arg: DocBuilder<'a>) -> DocBuilder<'a>
@@ -596,11 +622,6 @@ fn call_expr<'a>(
 fn ptr<'a>(ty: DocBuilder<'a>) -> DocBuilder<'a> {
     let alloc = ty.0;
     ty.append(alloc.text("*"))
-}
-
-fn assign_result_to<'a>(value: DocBuilder<'a>) -> DocBuilder<'a> {
-    let alloc = value.0;
-    assign_stmt(alloc.text(RESULT_VAR_NAME), value)
 }
 
 fn assign_stmt<'a>(var: DocBuilder<'a>, value: DocBuilder<'a>) -> DocBuilder<'a> {
@@ -681,7 +702,7 @@ mod test {
         let mut vis = LowerToC::new(&sem);
 
         tree.accept(&mut vis, &cx);
-        let result = vis.finish_expr();
+        let result = vis.finish_expr().code;
 
         let mut out = String::new();
         result.render_fmt(80, &mut out).unwrap();

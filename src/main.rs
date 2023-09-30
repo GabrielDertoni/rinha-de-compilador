@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use clap::Parser;
 
-use ast::from_json::{self, StrInterner};
+use ast::from_json;
 
 use exception::*;
 use value::*;
@@ -252,8 +252,7 @@ fn to_c<Node: ast::AstNode>(parse_cx: Rc<ast::from_json::BasicContext>, tree: No
     let sem = sem::SemanticContext::new(parse_cx);
     let mut vis = lower::LowerToC::new(&sem);
 
-    tree.accept(&mut vis, &cx);
-    let result = vis.finish(&doc_alloc);
+    let result = vis.eval_c(&doc_alloc, |vis| tree.accept(vis, &cx));
 
     let mut out = String::new();
     result.render_fmt(80, &mut out).unwrap();
