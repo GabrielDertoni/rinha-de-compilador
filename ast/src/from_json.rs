@@ -126,6 +126,8 @@ pub trait ExprAlloc {
 pub trait StrInterner {
     fn intern_str(&mut self, s: &str) -> ast::InternedStr;
 
+    fn get_str(&self, reference: ast::InternedStr) -> &str;
+
     fn intern_static(&mut self, s: &'static str) -> ast::InternedStr {
         self.intern_str(s)
     }
@@ -133,6 +135,8 @@ pub trait StrInterner {
 
 pub trait LocationAlloc {
     fn alloc_loc(&mut self, loc: ast::LocationData) -> ast::Location;
+
+    fn get_loc_data(&self, reference: ast::Location) -> &ast::LocationData;
 }
 
 /* -- Basic context -- */
@@ -212,6 +216,10 @@ impl StrInterner for BasicContext {
             ast::InternedStr(id as u32)
         }
     }
+
+    fn get_str(&self, reference: ast::InternedStr) -> &str {
+        &self[reference]
+    }
 }
 
 impl LocationAlloc for BasicContext {
@@ -219,9 +227,17 @@ impl LocationAlloc for BasicContext {
         let (id, _success) = self.locs.insert_full(loc);
         ast::Location(id as u32)
     }
+
+    fn get_loc_data(&self, reference: ast::Location) -> &ast::LocationData {
+        self.locs.get_index(reference.0 as usize).expect("invalid location reference")
+    }
 }
 
-impl VisitContext for BasicContext {}
+impl VisitContext for BasicContext {
+    fn get_expr(&self, id: ast::ExprId) -> &ast::Expr {
+        &self[id]
+    }
+}
 
 /* -- AST impls -- */
 

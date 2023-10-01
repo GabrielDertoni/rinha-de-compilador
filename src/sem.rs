@@ -129,6 +129,16 @@ impl FreeVars {
         }
     }
 
+    pub fn analyze<A, Cx>(node: &A, cx: &Cx) -> HashMap<ast::Ident, ast::ExprId>
+    where
+        A: AstNode,
+        Cx: ast::VisitContext,
+    {
+        let mut vis = Self::new();
+        node.accept(&mut vis, cx);
+        vis.finish()
+    }
+
     pub fn finish(self) -> HashMap<ast::Ident, ast::ExprId> {
         self.vars
     }

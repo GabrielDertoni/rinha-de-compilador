@@ -15,6 +15,7 @@ serde_json = "1.0.107"
 ast.path = "ast"
 ast-derive.path = "ast_derive"
 pretty = "0.12.3"
+slab = "0.4.9"
 
 [workspace]
 members = [

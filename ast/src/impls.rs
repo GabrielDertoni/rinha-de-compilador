@@ -16,7 +16,11 @@ impl Index<Ident> for std::rc::Rc<from_json::BasicContext> {
     }
 }
 
-impl VisitContext for std::rc::Rc<from_json::BasicContext> {}
+impl VisitContext for std::rc::Rc<from_json::BasicContext> {
+    fn get_expr(&self, id: ExprId) -> &Expr {
+        self.as_ref().get_expr(id)
+    }
+}
 
 impl Expr {
     pub fn as_var(&self) -> Option<&VarExpr> {
@@ -56,7 +60,7 @@ impl AstNode for ExprId {
         V: Visitor<Cx> + ?Sized,
         Cx: VisitContext + ?Sized,
     {
-        cx[*self].accept(visitor, cx)
+        cx.get_expr(*self).accept(visitor, cx)
     }
 }
 

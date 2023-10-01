@@ -17,7 +17,9 @@ macro_rules! from_json {
     } };
 }
 
-pub trait VisitContext: Index<ExprId, Output = Expr> {}
+pub trait VisitContext {
+    fn get_expr(&self, id: ExprId) -> &Expr;
+}
 
 pub trait AstNode {
     fn accept<V, Cx>(&self, visitor: &mut V, cx: &Cx)

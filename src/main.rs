@@ -1,7 +1,7 @@
 mod exception;
-mod value;
-mod sem;
 mod lower;
+mod sem;
+mod value;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -243,21 +243,32 @@ impl<'caller> Context<'caller> {
     }
 }
 
-fn to_c<Node: ast::AstNode>(parse_cx: Rc<ast::from_json::BasicContext>, tree: Node) -> String {
-    let doc_alloc = pretty::Arena::new();
-    let cx = lower::Context {
-        inner: parse_cx.clone(),
-        doc: &doc_alloc,
-    };
-    let sem = sem::SemanticContext::new(parse_cx);
-    let mut vis = lower::LowerToC::new(&sem);
+fn to_c(parse_cx: Rc<ast::from_json::BasicContext>, tree: ast::ExprId, width: usize) -> String {
+    let doc = lower::DocAlloc::new();
+    let sem = Rc::new(sem::SemanticContext::new(parse_cx.clone()));
+    let mut vis = lower::LowerToC::new(parse_cx, sem);
 
-    let result = vis.eval_c(&doc_alloc, |vis| tree.accept(vis, &cx));
+    let result = vis.eval_c(&doc, |vis, var| vis.gen_expr_id(tree, var, &doc));
 
     let mut out = String::new();
-    result.render_fmt(80, &mut out).unwrap();
+    result.render_fmt(width, &mut out).unwrap();
 
     out
+}
+
+fn term_width() -> usize {
+    use std::process::{Command, Stdio};
+
+    let out = Command::new("stty")
+        .arg("-f")
+        .arg("/dev/stderr")
+        .arg("size")
+        .stderr(Stdio::inherit())
+        .output()
+        .unwrap();
+    let out = String::from_utf8(out.stdout).unwrap();
+    let width = out.split_whitespace().skip(1).next().unwrap();
+    width.parse().unwrap()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -269,7 +280,10 @@ fn main() -> anyhow::Result<()> {
     let mut cx = from_json::BasicContext::new();
     let ast: ast::File = from_json::parse(&json, &mut cx)?;
 
-    let c = to_c(Rc::new(cx), ast.expr);
+    let w = term_width();
+    dbg!(w);
+
+    let c = to_c(Rc::new(cx), ast.expr, w);
     println!("{c}");
 
     /*
