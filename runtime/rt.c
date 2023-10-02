@@ -1,4 +1,5 @@
 #include "rt.h"
+#include <stddef.h>
 
 // static, read only data
 
@@ -78,10 +79,10 @@ object_t BUILTIN(mk_tuple)(object_t first, object_t second) {
 // call/2;
 object_t BUILTIN(call)(object_t callee, object_t arg_list) {
     if (callee->type != TYPE_CLOSURE) {
-        fprintf(stderr, "rt error: expected callee to be closure, but was something else");
+        fprintf(stderr, "rt error: expected callee to be closure, but was something else\n");
         exit(1);
     }
-    closure_base_t fn_ptr = (closure_base_t)callee->data.as_closure.base;
+    closure_base_t fn_ptr = (closure_base_t)callee->data.as_closure.entry;
     return fn_ptr(callee->data.as_closure.capture, arg_list);
 }
 
@@ -99,7 +100,7 @@ object_t BUILTIN(extern_call)(const char* name, object_t arg_list) {
 }
 
 // mk_arg_list/1;
-object_t BUILTIN(mk_arg_list)(int n) {
+object_t BUILTIN(mk_args)(int n) {
     object_t obj = (object_t)malloc(sizeof(object_data_t) + sizeof(object_t) * n);
     obj->type = TYPE_ARGS;
     obj->data.as_args.len = n;
@@ -107,7 +108,7 @@ object_t BUILTIN(mk_arg_list)(int n) {
 }
 
 // set_arg_list/3;
-object_t BUILTIN(set_arg_list)(object_t arg_list, int i, object_t value) {
+object_t BUILTIN(set_arg)(object_t arg_list, int i, object_t value) {
     // TODO: exception
     assert(arg_list->type == TYPE_ARGS);
     assert(i >= 0 && i < arg_list->data.as_args.len);
@@ -117,13 +118,42 @@ object_t BUILTIN(set_arg_list)(object_t arg_list, int i, object_t value) {
 }
 
 // get_arg_list/2;
-object_t BUILTIN(get_arg_list)(object_t arg_list, int i) {
+object_t BUILTIN(get_arg)(object_t arg_list, int i) {
     // TODO: exception
     assert(arg_list->type == TYPE_ARGS);
     assert(i >= 0 && i < arg_list->data.as_args.len);
 
     return arg_list->data.as_args.args[i];
 }
+
+object_t BUILTIN(mk_var_uninit)() {
+    return BUILTIN(mk_object)(TYPE_UNINIT, (data_t) {0});
+}
+
+object_t* BUILTIN(mk_closure)(int n_fields, void* entry) {
+    object_t closure = (object_t)malloc(sizeof(object_data_t) + sizeof(object_t) * n_fields);
+    closure->type = TYPE_CLOSURE;
+    closure->data.as_closure.entry = entry;
+    return closure->data.as_closure.capture;
+}
+
+object_t BUILTIN(closure_obj)(object_t* capture) {
+    return (object_t)((void*)capture - offsetof(object_data_t, data.as_closure.capture));
+}
+
+object_t BUILTIN(var_init)(object_t var, object_t value) {
+    assert(var->type == TYPE_UNINIT); // Cannot initialize variable twice
+    var->type = value->type;
+    var->data = value->data;
+    return var;
+}
+
+bool BUILTIN(read_bool)(object_t value) {
+    assert(value->type == TYPE_BOOL);
+    return value->data.as_bool;
+}
+
+/* -- BINARY OPERATIONS -- */
 
 object_t BUILTIN(lt)(object_t lhs, object_t rhs) {
     // TODO: Throw exception

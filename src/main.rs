@@ -246,7 +246,7 @@ impl<'caller> Context<'caller> {
 fn to_c(parse_cx: Rc<ast::from_json::BasicContext>, tree: ast::ExprId, width: usize) -> String {
     let doc = lower::DocAlloc::new();
     let sem = Rc::new(sem::SemanticContext::new(parse_cx.clone()));
-    let mut vis = lower::LowerToC::new(parse_cx, sem);
+    let vis = lower::LowerToC::new(parse_cx, sem);
 
     let result = vis.eval_c(&doc, |vis, var| vis.gen_expr_id(tree, var, &doc));
 

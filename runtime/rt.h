@@ -26,6 +26,8 @@ typedef enum {
     TYPE_CLOSURE,
     TYPE_NULL,
     TYPE_ARGS,
+
+    TYPE_UNINIT,
 } type_t;
 
 // Null terminated for better compatibility
@@ -45,7 +47,7 @@ typedef struct arg_list_data {
 } arg_list_t;
 
 typedef struct closure_data {
-    void* base;
+    void* entry;
     object_t capture[];
 } closure_data_t;
 
@@ -104,13 +106,28 @@ object_t BUILTIN(call)(object_t callee, object_t arg_list);
 object_t BUILTIN(extern_call)(const char* name, object_t arg_list);
 
 // mk_arg_list/1;
-object_t BUILTIN(mk_arg_list)(int n);
+object_t BUILTIN(mk_args)(int n);
 
 // set_arg_list/3;
-object_t BUILTIN(set_arg_list)(object_t arg_list, int i, object_t value);
+object_t BUILTIN(set_arg)(object_t arg_list, int i, object_t value);
 
 // get_arg_list/2;
-object_t BUILTIN(get_arg_list)(object_t arg_list, int i);
+object_t BUILTIN(get_arg)(object_t arg_list, int i);
+
+// mk_var_uninit/0;
+object_t BUILTIN(mk_var_uninit)();
+
+// mk_closure/2;
+object_t* BUILTIN(mk_closure)(int n_fields, void* entry);
+
+// closure_obj/1;
+object_t BUILTIN(closure_obj)(object_t* capture);
+
+// var_init/2;
+object_t BUILTIN(var_init)(object_t var, object_t value);
+
+// read_boo/1;
+bool BUILTIN(read_bool)(object_t value);
 
 // Arithmetic operations
 

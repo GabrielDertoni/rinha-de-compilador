@@ -10,7 +10,6 @@ type BuildDoc<'a> = pretty::BuildDoc<'a, pretty::RefDoc<'a>, ()>;
 type DocBuilder<'a> = pretty::DocBuilder<'a, DocAlloc<'a>, ()>;
 
 const CAPTURE_VAR_NAME: &'static str = "capture";
-const CLOSURE_FN_PTR_NAME: &'static str = "base";
 const OBJECT_TYPE: &'static str = "object_t";
 
 macro_rules! fmt {
@@ -27,9 +26,9 @@ pub struct LowerToC<'a> {
     // Code that is goingo the top of the C output
     toplevel: BuildDoc<'a>,
     // How many C variables we need to allocate hoisted
-    hoisted_vars: usize,
+    allocd_registers: usize,
     // How many C variables are live
-    live_vars: usize,
+    live_regs: usize,
 }
 
 impl<'a> LowerToC<'a> {
@@ -38,40 +37,14 @@ impl<'a> LowerToC<'a> {
             cx,
             sem,
             toplevel: BuildDoc::nil(),
-            hoisted_vars: 1,
-            live_vars: 1,
+            allocd_registers: 0,
+            live_regs: 0,
         }
     }
 
+    // Returns the place for a temporary variable. The variable will have type `object_t`.
     pub fn tmp_var(&self) -> Place {
-        Place::Register(self.live_vars)
-    }
-
-    /// Mark the last temporary variable as "used" so that it won't be clobbered by other operations inside
-    /// of the scope.
-    pub fn push_var(&mut self) {
-        self.live_vars += 1;
-        self.hoisted_vars = self.hoisted_vars.max(self.live_vars);
-    }
-
-    /// Evaluate an expression and save the result to a fresh variable. `action` should build
-    /// an expression inside of `self` that will be finished once it returns.
-    pub fn eval(
-        &mut self,
-        doc: &'a DocAlloc<'a>,
-        action: impl FnOnce(&mut Self, Place) -> DocBuilder<'a>,
-    ) -> CExprResult<'a> {
-        // The result of the expression will be stored in this variable
-        let var = self.tmp_var();
-        let code = action(self, var.clone());
-
-        // Mark the value as used. We only need to do this here, since `action` may
-        // use `var` as it wishes, so long as it writes the final value to it in
-        // the end of the expression. However, now we have the value we wanted in
-        // the variable and should no longer change it within the scope.
-        self.push_var();
-
-        CExprResult { code, var }
+        Place::Register(self.live_regs)
     }
 
     pub fn eval_c(
@@ -87,28 +60,33 @@ impl<'a> LowerToC<'a> {
     // A scope allows for use of variables local to it, it also calls `finish_expr` at the end.
     // The result of evaluating the expression will be stored on a new variable. `action`
     // should generate code for one expression.
-    pub fn scope<R>(&mut self, action: impl FnOnce(&mut Self) -> R) -> R {
-        let save_live_vars = self.live_vars;
-        let result = action(self);
-        self.live_vars = save_live_vars;
+    pub fn scope<R>(&mut self, vars: usize, action: impl FnOnce(&mut Self, &[Place]) -> R) -> R {
+        let save_live_vars = self.live_regs;
+
+        // Allocate the registers
+        let regs = (0..vars)
+            .map(|i| self.live_regs + i)
+            .map(Place::Register)
+            .collect::<Vec<_>>();
+        self.live_regs += vars;
+        self.allocd_registers = self.allocd_registers.max(self.live_regs);
+
+        let result = action(self, &regs);
+        self.live_regs = save_live_vars;
         result
     }
 
-    pub fn fn_scope<R>(
-        &mut self,
-        doc: &'a DocAlloc<'a>,
-        action: impl FnOnce(&mut Self, Place) -> R,
-    ) -> R {
-        let save_hoisted = self.hoisted_vars;
-        let save_live = self.live_vars;
+    pub fn fn_scope<R>(&mut self, action: impl FnOnce(&mut Self, Place) -> R) -> R {
+        let save_hoisted = self.allocd_registers;
+        let save_live = self.live_regs;
 
-        self.hoisted_vars = 0;
-        self.live_vars = 0;
+        self.allocd_registers = 0;
+        self.live_regs = 0;
         let var = self.tmp_var();
-        let result = action(self, var);
+        let result = action(self, var.into());
 
-        self.hoisted_vars = save_hoisted;
-        self.live_vars = save_live;
+        self.allocd_registers = save_hoisted;
+        self.live_regs = save_live;
         result
     }
 
@@ -119,13 +97,19 @@ impl<'a> LowerToC<'a> {
     }
 
     // Finish the current scope of the enclosing function
-    pub fn gen_hoisted(&mut self, doc: &'a DocAlloc<'a>) -> DocBuilder<'a> {
-        doc.stmts((0..self.hoisted_vars).map(|i| doc.obj_decl_stmt(fmt!(doc, "_{i}"))))
+    pub fn gen_register_allocs(&mut self, doc: &'a DocAlloc<'a>) -> DocBuilder<'a> {
+        doc.stmts(
+            // There is always at least one register allocated. This way code can always assume
+            // it can use a tmp variable from `self.tmp_var()`.
+            (0..=self.allocd_registers)
+                .map(Place::Register)
+                .map(|reg| doc.obj_decl_stmt(reg.pretty(doc))),
+        )
     }
 
     // Return the completed C document
     pub fn finish(mut self, doc: &'a DocAlloc<'a>, main: DocBuilder<'a>) -> DocBuilder<'a> {
-        let scope = self.gen_hoisted(doc);
+        let scope = self.gen_register_allocs(doc);
         doc.stmts([
             doc.text("#include \"rt.h\""),
             self.toplevel.pretty(doc),
@@ -133,7 +117,7 @@ impl<'a> LowerToC<'a> {
         ])
     }
 
-    fn load_var(&self, ident: ast::Ident, doc: &'a DocAlloc<'a>) -> Place {
+    fn load_var(&self, ident: ast::Ident) -> Place {
         Place::var(&self.cx[ident])
         /*
         let id = self.curr.expect("inside expr");
@@ -146,27 +130,8 @@ impl<'a> LowerToC<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CExprResult<'a> {
-    pub code: DocBuilder<'a>,
-    // NOTE: In practice, will always be a `Place::Register`
-    pub var: Place,
-}
-
-impl<'a> CExprResult<'a> {
-    pub fn merge(
-        self,
-        other: Self,
-        combine: impl FnOnce(Place, Place) -> DocBuilder<'a>,
-    ) -> DocBuilder<'a> {
-        let doc = self.code.0;
-        self.code
-            .append(doc.hardline())
-            .append(other.code)
-            .append(doc.hardline())
-            .append(combine(self.var, other.var))
-    }
-}
+#[derive(Debug, Clone, Copy)]
+pub struct Register(pub usize);
 
 #[derive(Debug, Clone)]
 pub enum Place {
@@ -228,7 +193,7 @@ impl<'a> LowerToC<'a> {
         result_var: Place,
         doc: &'a DocAlloc<'a>,
     ) -> DocBuilder<'a> {
-        let var = self.load_var(expr.ident, doc);
+        let var = self.load_var(expr.ident);
         doc.assign_place(result_var, var)
     }
 
@@ -263,24 +228,37 @@ impl<'a> LowerToC<'a> {
 
         // Lets generate the function
 
-        let fn_body = self.fn_scope(doc, |vis, result_var| {
+        let fn_body = self.fn_scope(|vis, result_var| {
             // Inside the function, first load arguments from the argument list
-            let load_args = doc.stmts(expr.params.iter().enumerate().flat_map(|(i, param)| {
+            let load_args = doc.stmts(expr.params.iter().enumerate().map(|(i, param)| {
                 // objec_t _user_var0;
                 // _user_var0 = get_arg(result, 0);
                 let var = Place::var(&vis.cx[param.ident]);
-                [
-                    doc.obj_decl_stmt(var.clone()),
-                    doc.assign_place(
-                        var,
-                        doc.builtin_call2(get_arg, arg_list.clone(), doc.as_string(i)),
-                    ),
-                ]
+                doc.decl_stmt(
+                    OBJECT_TYPE,
+                    var.clone(),
+                    Some(doc.builtin_call2(get_arg, arg_list.clone(), doc.as_string(i))),
+                )
             }));
+
+            let load_captures =
+                doc.stmts(free_vars.keys().map(|&var| {
+                    let var = doc.user_var(&vis.cx[var]);
+                    doc.decl_stmt(
+                        OBJECT_TYPE,
+                        var.clone(),
+                        Some(doc.assign_stmt(
+                            var.clone(),
+                            doc.ptr_field(doc.text(CAPTURE_VAR_NAME), var),
+                        )),
+                    )
+                }));
 
             // Now finally generate the code for the function
             let body = vis.gen_expr_id(expr.body, result_var.clone(), doc);
             doc.stmts([
+                vis.gen_register_allocs(doc),
+                load_captures,
                 load_args,
                 body,
                 // return result;
@@ -295,33 +273,37 @@ impl<'a> LowerToC<'a> {
 
         // Now load everything we need into the closure's capture struct
         doc.stmts([
-            // _closure_N capture_n;
-            doc.decl_stmt(doc.ptr(struct_name.clone()), closure_var.clone(), None),
-            // closure = (_closure_N*)malloc(sizeof(CLOSURE_STRUCT));
-            doc.assign_stmt(
+            // _capture_0* capture_0 = (_capture_0*)mk_closure(N_CAPTURED, (void*)_closure_fn_0);
+            doc.decl_stmt(
+                doc.ptr(struct_name.clone()),
                 closure_var.clone(),
-                doc.cast(
+                Some(doc.cast(
                     doc.ptr(struct_name.clone()),
-                    doc.call_expr(doc.text("malloc"), [doc.sizeof(struct_name)]),
-                ),
+                    doc.builtin_call2(
+                        mk_closure,
+                        doc.as_string(free_vars.len()),
+                        doc.cast(doc.text("void*"), fn_name.clone()),
+                    ),
+                )),
             ),
-            // closure->base = (void*)_closure_fn_0;
-            doc.assign_stmt(
-                doc.ptr_field(closure_var.clone(), CLOSURE_FN_PTR_NAME),
-                doc.cast(doc.text("void*"), fn_name.clone()),
-            ),
-            // closure->_user_var0 = _user_var0;
-            // closure->_user_var1 = _user_var1;
+            // capture_0->_user_var0 = _user_var0;
+            // capture_0->_user_var1 = _user_var1;
             // ...and so on
             doc.stmts(free_vars.keys().map(|&ident| {
                 let var = doc.user_var(&self.cx[ident]);
                 doc.assign_stmt(
                     doc.ptr_field(closure_var.clone(), var),
-                    self.load_var(ident, doc),
+                    self.load_var(ident),
                 )
             })),
-            // result = closure;
-            doc.assign_place(result_var, closure_var),
+            // result = closure_obj(capture_0);
+            doc.assign_place(
+                result_var,
+                doc.builtin_call1(
+                    closure_obj,
+                    doc.cast(doc.ptr(doc.text(OBJECT_TYPE)), closure_var),
+                ),
+            ),
         ])
     }
 
@@ -331,12 +313,19 @@ impl<'a> LowerToC<'a> {
         result_var: Place,
         doc: &'a DocAlloc<'a>,
     ) -> DocBuilder<'a> {
-        let var = self.tmp_var();
-        let condition = self.gen_expr_id(expr.condition, var.clone(), doc);
+        let condition_var = self.tmp_var();
+        let condition_code = self.gen_expr_id(expr.condition, condition_var.clone(), doc);
         let then = self.gen_expr_id(expr.then, result_var.clone(), doc);
         let otherwise = self.gen_expr_id(expr.otherwise, result_var, doc);
 
-        doc.stmts([condition, doc.if_stmt(var, then, otherwise)])
+        doc.stmts([
+            condition_code,
+            doc.if_stmt(
+                doc.builtin_call1(read_bool, condition_var.pretty(doc)),
+                then,
+                otherwise,
+            ),
+        ])
     }
 
     pub fn gen_let_expr(
@@ -366,35 +355,38 @@ impl<'a> LowerToC<'a> {
         result_var: Place,
         doc: &'a DocAlloc<'a>,
     ) -> DocBuilder<'a> {
-        let op: &'static str = match expr.op {
-            ast::BinOp::Add => "+",
-            ast::BinOp::Sub => "-",
-            ast::BinOp::Mul => "*",
-            ast::BinOp::Div => "/",
-            ast::BinOp::Rem => "%",
-            ast::BinOp::Eq => "==",
-            ast::BinOp::Neq => "!=",
-            ast::BinOp::Lt => "<",
-            ast::BinOp::Gt => ">",
-            ast::BinOp::Lte => "<=",
-            ast::BinOp::Gte => ">=",
-            ast::BinOp::And => "&&",
-            ast::BinOp::Or => "||",
+        let op_builtin: &'static str = match expr.op {
+            ast::BinOp::Add => add::NAME,
+            ast::BinOp::Sub => sub::NAME,
+            ast::BinOp::Mul => mul::NAME,
+            ast::BinOp::Div => div::NAME,
+            ast::BinOp::Rem => rem::NAME,
+            ast::BinOp::Eq => eq::NAME,
+            ast::BinOp::Neq => neq::NAME,
+            ast::BinOp::Lt => lt::NAME,
+            ast::BinOp::Gt => gt::NAME,
+            ast::BinOp::Lte => lte::NAME,
+            ast::BinOp::Gte => gte::NAME,
+            ast::BinOp::And => and::NAME,
+            ast::BinOp::Or => or::NAME,
         };
 
-        self.scope(|vis| {
-            let lhs = vis.eval(doc, |vis, var| vis.gen_expr_id(expr.lhs, var, doc));
-            let rhs = vis.eval(doc, |vis, var| vis.gen_expr_id(expr.rhs, var, doc));
+        self.scope(2, |vis, regs| {
+            let [lhs, rhs] = regs else { unreachable!() };
+            let lhs_code = vis.gen_expr_id(expr.lhs, lhs.clone().into(), doc);
+            let rhs_code = vis.gen_expr_id(expr.rhs, rhs.clone().into(), doc);
 
-            lhs.merge(rhs, |lhs, rhs| {
+            doc.stmts([
+                lhs_code,
+                rhs_code,
                 doc.assign_place(
                     result_var,
-                    doc.intersperse(
-                        [lhs.pretty(doc), doc.text(op), rhs.pretty(doc)],
-                        doc.space(),
+                    doc.call_expr(
+                        doc.text(op_builtin),
+                        [lhs.clone().pretty(doc), rhs.clone().pretty(doc)],
                     ),
-                )
-            })
+                ),
+            ])
         })
     }
 
@@ -417,16 +409,23 @@ impl<'a> LowerToC<'a> {
                 result_var,
                 doc.builtin_call1(mk_bool, doc.as_string(bool.value)),
             ),
-            ast::LitExpr::Tuple(tup) => self.scope(|vis| {
-                let fst = vis.eval(doc, |vis, var| vis.gen_expr_id(tup.first, var, doc));
-                let snd = vis.eval(doc, |vis, var| vis.gen_expr_id(tup.second, var, doc));
+            ast::LitExpr::Tuple(tup) => self.scope(2, |vis, regs| {
+                let [fst, snd] = regs else { unreachable!() };
+                let fst_code = vis.gen_expr_id(tup.first, fst.clone(), doc);
+                let snd_code = vis.gen_expr_id(tup.second, snd.clone(), doc);
 
-                fst.merge(snd, |fst, snd| {
+                doc.stmts([
+                    fst_code,
+                    snd_code,
                     doc.assign_place(
                         result_var,
-                        doc.builtin_call2(mk_tuple, fst.pretty(doc), snd.pretty(doc)),
-                    )
-                })
+                        doc.builtin_call2(
+                            mk_tuple,
+                            fst.clone().pretty(doc),
+                            snd.clone().pretty(doc),
+                        ),
+                    ),
+                ])
             }),
         }
     }
@@ -437,40 +436,39 @@ impl<'a> LowerToC<'a> {
         result_var: Place,
         doc: &'a DocAlloc<'a>,
     ) -> DocBuilder<'a> {
-        self.scope(|vis| {
-            let callee = vis.eval(doc, |vis, var| vis.gen_expr_id(expr.callee, var, doc));
+        self.scope(2, |vis, regs| {
+            let [callee, args_var] = regs else { unreachable!() };
 
-            let mut code = callee.code;
-            let mut args = Vec::new();
-
-            for &arg in &expr.args {
-                let arg = vis.eval(doc, |vis, var| vis.gen_expr_id(arg, var, doc));
-                code = code.append(doc.hardline()).append(arg.code);
-                args.push(arg.var);
-            }
-
-            let tmp = vis.tmp_var();
+            let callee_code = vis.gen_expr_id(expr.callee, callee.clone(), doc);
+            let args_code = doc.stmts(expr.args.iter().enumerate().map(|(i, &arg)| {
+                vis.scope(1, |vis, regs| {
+                    let code = vis.gen_expr_id(arg, regs[0].clone(), doc);
+                    doc.stmts([
+                        code,
+                        // set_arg(tmp, 0, arg0);
+                        doc.stmt(doc.builtin_call3(
+                            set_arg,
+                            args_var.clone().pretty(doc),
+                            doc.as_string(i),
+                            regs[0].clone().pretty(doc),
+                        )),
+                    ])
+                })
+            }));
 
             doc.stmts([
-                code,
+                callee_code,
                 // tmp = mk_args(N);
                 doc.assign_place(
-                    tmp.clone(),
+                    args_var.clone(),
                     doc.builtin_call1(mk_args, doc.as_string(expr.args.len())),
                 ),
-                // set_arg(tmp, 0, arg0);
-                // set_arg(tmp, 1, arg1);
-                // ...and so on
-                doc.stmts(args.into_iter().enumerate().map(|(i, arg)| {
-                    doc.stmt(doc.builtin_call3(
-                        set_arg,
-                        tmp.clone().pretty(doc),
-                        doc.as_string(i),
-                        arg.pretty(doc),
-                    ))
-                })),
+                args_code,
                 // result = call(callee, result /* the arg list */);
-                doc.assign_place(result_var, doc.builtin_call2(call, callee.var.pretty(doc), tmp.pretty(doc))),
+                doc.assign_place(
+                    result_var,
+                    doc.builtin_call2(call, callee.clone().pretty(doc), args_var.clone().pretty(doc)),
+                ),
             ])
         })
     }
@@ -481,22 +479,19 @@ impl<'a> LowerToC<'a> {
         result_var: Place,
         doc: &'a DocAlloc<'a>,
     ) -> DocBuilder<'a> {
-        self.scope(|vis| {
-            let mut code: DocBuilder<'a> = doc.nil();
-            let mut vars = Vec::new();
-
-            for &arg in &expr.args {
-                let result = vis.eval(doc, |vis, var| vis.gen_expr_id(arg, var, doc));
-
-                code = code.append(result.code);
-                vars.push(result.var);
-            }
+        self.scope(expr.args.len(), |vis, regs| {
+            let args_code = doc.stmts(
+                expr.args
+                    .iter()
+                    .zip(regs)
+                    .map(|(&arg, var)| vis.gen_expr_id(arg, var.clone(), doc)),
+            );
 
             let fn_name = doc.as_string(&vis.cx[expr.name]).double_quotes();
             let args_var = vis.tmp_var();
 
             doc.stmts([
-                code,
+                args_code,
                 // result = mk_args(N);
                 doc.assign_place(
                     args_var.clone(),
@@ -505,8 +500,13 @@ impl<'a> LowerToC<'a> {
                 // set_arg(result, 0, arg0);
                 // set_arg(result, 1, arg1);
                 // ...and so on
-                doc.stmts(vars.into_iter().enumerate().map(|(i, arg)| {
-                    doc.stmt(doc.builtin_call3(set_arg, args_var.clone().pretty(doc), doc.as_string(i), arg.pretty(doc)))
+                doc.stmts(regs.iter().enumerate().map(|(i, reg)| {
+                    doc.stmt(doc.builtin_call3(
+                        set_arg,
+                        args_var.clone().pretty(doc),
+                        doc.as_string(i),
+                        reg.clone().pretty(doc),
+                    ))
                 })),
                 // result = extern_call("builtin_name", result);
                 doc.assign_place(
@@ -547,9 +547,14 @@ declare_builtins! {
     mk_int/1;
     mk_bool/1;
     mk_tuple/2;
+    mk_closure/2;
 
     mk_var_uninit/0;
-    var_assign/2;
+    var_init/2;
+
+    read_bool/1;
+
+    closure_obj/1;
 
     call/2;
     extern_call/2;
@@ -563,12 +568,15 @@ declare_builtins! {
     sub/2;
     mul/2;
     div/2;
+    rem/2;
     eq/2;
     neq/2;
-    le/2;
-    leq/2;
-    ge/2;
-    geq/2;
+    lt/2;
+    lte/2;
+    gt/2;
+    gte/2;
+    and/2;
+    or/2;
 }
 
 pub struct DocAlloc<'a> {
@@ -671,6 +679,15 @@ impl<'a> DocAlloc<'a> {
         self.call_expr(self.text("sizeof"), [ty])
     }
 
+    fn bin_expr(
+        &'a self,
+        lhs: DocBuilder<'a>,
+        op: DocBuilder<'a>,
+        rhs: DocBuilder<'a>,
+    ) -> DocBuilder<'a> {
+        self.intersperse([lhs, op, rhs], self.space())
+    }
+
     fn assign_stmt(
         &'a self,
         var: impl Pretty<'a, Self>,
@@ -679,10 +696,17 @@ impl<'a> DocAlloc<'a> {
         self.stmt(docs![self, var, self.reflow(" = "), value])
     }
 
-    fn assign_place(&'a self, place: Place, value: impl Pretty<'a, Self>) -> DocBuilder<'a> {
+    fn assign_place(
+        &'a self,
+        place: impl Into<Place>,
+        value: impl Pretty<'a, Self>,
+    ) -> DocBuilder<'a> {
+        let place = place.into();
         match &place {
             Place::Register(_) => self.assign_stmt(place, value),
-            Place::Var(_) => self.builtin_call2(var_assign, place.pretty(self), value.pretty(self)),
+            Place::Var(_) => {
+                self.stmt(self.builtin_call2(var_init, place.pretty(self), value.pretty(self)))
+            }
         }
     }
 
@@ -734,7 +758,7 @@ impl<'a> DocAlloc<'a> {
     }
 
     fn return_stmt(&'a self, value: impl Pretty<'a, Self>) -> DocBuilder<'a> {
-        docs![self, "return ", value]
+        self.stmt(docs![self, "return ", value])
     }
 
     fn block(&'a self, doc: DocBuilder<'a>) -> DocBuilder<'a> {
